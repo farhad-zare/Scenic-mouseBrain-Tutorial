@@ -1,0 +1,225 @@
+---
+title: "Untitled"
+output: html_document
+date: '2022-07-21'
+---
+
+```{r}
+loomPath <- system.file(package="SCENIC", "examples/mouseBrain_toy.loom")
+library(SCopeLoomR)
+loom <- open_loom(loomPath)
+exprMat <- get_dgem(loom)
+cellInfo <- get_cell_annotation(loom)
+close_loom(loom)
+```
+
+```{r}
+exprMat[1:5,1:5]
+```
+```{r}
+head(cellInfo)
+```
+
+
+
+```{r}
+### Initialize settings
+library(SCENIC)
+scenicOptions <- initializeScenic(org="mgi", dbDir="/Users/farhadzare/Desktop/Thesis for master/Untitled Folder/databases", nCores=10)
+
+saveRDS(scenicOptions, file="int/scenicOptions.Rds")
+```
+```{r}
+scenicOptions
+```
+
+```{r}
+### Co-expression network
+genesKept <- geneFiltering(exprMat, scenicOptions)
+exprMat_filtered <- exprMat[genesKept, ]
+
+#GENIE3/GRNBoost can detect both positive and negative associations. In order to distinguish potential activation from repression, we will split the targets into positive- and negative-correlated targets (i.e. Spearman correlation between the TF and the potential target).
+
+
+runCorrelation(exprMat_filtered, scenicOptions)
+exprMat_filtered_log <- log2(exprMat_filtered+1) 
+runGenie3(exprMat_filtered_log, scenicOptions)
+```
+To build the gene regulatory network: 1. Get co-expression modules 2. Get regulons (with RcisTarget): TF motif analysis) Identify cell states: 3. Score GRN (regulons) in the cells (with AUCell) 4. Cluster cells according to the GRN activity
+
+```{r}
+### Build and score the GRN
+exprMat_log <- log2(exprMat+1)
+scenicOptions@settings$dbs <- scenicOptions@settings$dbs["10kb"] # Toy run settings
+scenicOptions <- runSCENIC_1_coexNetwork2modules(scenicOptions)
+scenicOptions <- runSCENIC_2_createRegulons(scenicOptions, coexMethod=c("top5perTarget")) # Toy run settings
+scenicOptions <- runSCENIC_3_scoreCells(scenicOptions, exprMat_log)
+```
+```{r}
+# Optional: Binarize activity
+ aucellApp <- plotTsne_AUCellApp(scenicOptions, exprMat_log)
+ savedSelections <- shiny::runApp(aucellApp)
+```
+
+
+```{r}
+# Save the modified thresholds:
+newThresholds <- savedSelections$thresholds
+ scenicOptions@fileNames$int["aucell_thresholds",1] <- "int/newThresholds.Rds"
+ saveRDS(newThresholds, file=getIntName(scenicOptions, "aucell_thresholds"))
+scenicOptions <- runSCENIC_4_aucell_binarize(scenicOptions)
+
+tsneAUC(scenicOptions, aucType="AUC") # choose settings
+```
+```{r}
+# Export:
+ saveRDS(cellInfo, file=getDatasetInfo(scenicOptions, "cellInfo")) # Temporary, to add to loom
+#export2loom(scenicOptions, exprMat)
+```
+
+
+### Exploring output 
+# Check files in folder 'output'
+# Browse the output .loom file @ http://scope.aertslab.org
+```{r}
+nPcs <- c(5) # For toy dataset
+ nPcs <- c(5,15,50)
+```
+
+The cells can be grouped/clustered based on the regulon activity, either continuous or binarized
+
+```{r}
+scenicOptions@settings$seed <- 123 # same seed for all of them
+# Run t-SNE with different settings:
+fileNames <- tsneAUC(scenicOptions, aucType="AUC", nPcs=nPcs, perpl=c(5,15,50))
+fileNames <- tsneAUC(scenicOptions, aucType="AUC", nPcs=nPcs, perpl=c(5,15,50), onlyHighConf=TRUE, filePrefix="int/tSNE_oHC")
+# Plot as pdf (individual files in int/):
+fileNames <- paste0("int/",grep(".Rds", grep("tSNE_", list.files("int"), value=T), value=T))
+```
+
+```{r}
+par(mfrow=c(length(nPcs), 3))
+fileNames <- paste0("int/",grep(".Rds", grep("tSNE_AUC", list.files("int"), value=T, perl = T), value=T))
+plotTsne_compareSettings(fileNames, scenicOptions, showLegend=FALSE, varName="CellType", cex=.5)
+```
+```{r}
+# Using only "high-confidence" regulons (normally similar)
+par(mfrow=c(3,3))
+fileNames <- paste0("int/",grep(".Rds", grep("tSNE_oHC_AUC", list.files("int"), value=T, perl = T), value=T))
+plotTsne_compareSettings(fileNames, scenicOptions, showLegend=FALSE, varName="CellType", cex=.5)
+```
+```{r}
+scenicOptions@settings$defaultTsne$aucType <- "AUC"
+scenicOptions@settings$defaultTsne$dims <- 5
+scenicOptions@settings$defaultTsne$perpl <- 15
+saveRDS(scenicOptions, file="int/scenicOptions.Rds")
+```
+
+
+```{r}
+library(SCopeLoomR)
+scenicLoomPath <- getOutName(scenicOptions, "loomFile")
+loom <- open_loom(scenicLoomPath)
+
+# Read information from loom file:
+regulons_incidMat <- get_regulons(loom)
+regulons <- regulonsToGeneLists(regulons_incidMat)
+regulonsAUC <- get_regulons_AUC(loom)
+regulonsAucThresholds <- get_regulon_thresholds(loom)
+embeddings <- get_embeddings(loom)
+```
+
+
+```{r}
+exprMat_log <- exprMat # Better if it is logged/normalized
+aucellApp <- plotTsne_AUCellApp(scenicOptions, exprMat_log) # default t-SNE
+savedSelections <- shiny::runApp(aucellApp)
+```
+
+```{r}
+print(tsneFileName(scenicOptions))
+```
+
+
+```{r}
+tSNE_scenic <- readRDS(tsneFileName(scenicOptions))
+aucell_regulonAUC <- loadInt(scenicOptions, "aucell_regulonAUC")
+
+# Show TF expression:
+par(mfrow=c(2,3))
+AUCell::AUCell_plotTSNE(tSNE_scenic$Y, exprMat, aucell_regulonAUC[onlyNonDuplicatedExtended(rownames(aucell_regulonAUC))[c("Dlx5", "Sox10", "Sox9","Irf1", "Stat6")],], plots="Expression")
+```
+```{r}
+# Save AUC as PDF:
+Cairo::CairoPDF("output/Step4_BinaryRegulonActivity_tSNE_colByAUC.pdf", width=20, height=15)
+par(mfrow=c(4,6))
+AUCell::AUCell_plotTSNE(tSNE_scenic$Y, cellsAUC=aucell_regulonAUC, plots="AUC")
+dev.off()
+```
+
+```{r}
+library(KernSmooth)
+library(RColorBrewer)
+dens2d <- bkde2D(tSNE_scenic$Y, 1)$fhat
+image(dens2d, col=brewer.pal(9, "YlOrBr"), axes=FALSE)
+contour(dens2d, add=TRUE, nlevels=5, drawlabels=FALSE)
+```
+
+```{r}
+regulons <- loadInt(scenicOptions, "regulons")
+regulons[c("Dlx5", "Irf1")]
+```
+```{r}
+regulons <- loadInt(scenicOptions, "aucell_regulons")
+cbind(onlyNonDuplicatedExtended(names(regulons)))
+```
+```{r}
+regulonTargetsInfo <- loadInt(scenicOptions, "regulonTargetsInfo")
+tableSubset <- regulonTargetsInfo[TF=="Stat6" & highConfAnnot==TRUE]
+viewMotifs(tableSubset, options=list(pageLength=5))
+```
+```{r}
+motifEnrichment_selfMotifs_wGenes <- loadInt(scenicOptions, "motifEnrichment_selfMotifs_wGenes")
+tableSubset <- motifEnrichment_selfMotifs_wGenes[highlightedTFs=="Dlx5"]
+viewMotifs(tableSubset) 
+```
+```{r}
+regulonAUC <- loadInt(scenicOptions, "aucell_regulonAUC")
+regulonAUC <- regulonAUC[onlyNonDuplicatedExtended(rownames(regulonAUC)),]
+regulonActivity_byCellType <- sapply(split(rownames(cellInfo), cellInfo$CellType),
+                                     function(cells) rowMeans(getAUC(regulonAUC)[,cells]))
+regulonActivity_byCellType_Scaled <- t(scale(t(regulonActivity_byCellType), center = T, scale=T))
+
+ComplexHeatmap::Heatmap(regulonActivity_byCellType_Scaled, name="Regulon activity")
+```
+```{r}
+topRegulators <- reshape2::melt(regulonActivity_byCellType_Scaled)
+colnames(topRegulators) <- c("Regulon", "CellType", "RelativeActivity")
+topRegulators <- topRegulators[which(topRegulators$RelativeActivity>0),]
+viewTable(topRegulators)
+```
+```{r}
+minPerc <- .7
+binaryRegulonActivity <- loadInt(scenicOptions, "aucell_binary_nonDupl")
+cellInfo_binarizedCells <- cellInfo[which(rownames(cellInfo)%in% colnames(binaryRegulonActivity)),, drop=FALSE]
+regulonActivity_byCellType_Binarized <- sapply(split(rownames(cellInfo_binarizedCells), cellInfo_binarizedCells$CellType), 
+                                               function(cells) rowMeans(binaryRegulonActivity[,cells, drop=FALSE]))
+binaryActPerc_subset <- regulonActivity_byCellType_Binarized[which(rowSums(regulonActivity_byCellType_Binarized>minPerc)>0),]
+ComplexHeatmap::Heatmap(binaryActPerc_subset, name="Regulon activity (%)", col = c("white","pink","red"))
+```
+```{r}
+topRegulators <- reshape2::melt(regulonActivity_byCellType_Binarized)
+colnames(topRegulators) <- c("Regulon", "CellType", "RelativeActivity")
+topRegulators <- topRegulators[which(topRegulators$RelativeActivity>minPerc),]
+viewTable(topRegulators)
+```
+
+```{r}
+
+# Cell-type specific regulators (RSS): 
+regulonAUC <- loadInt(scenicOptions, "aucell_regulonAUC")
+rss <- calcRSS(AUC=getAUC(regulonAUC), cellAnnotation=cellInfo[colnames(regulonAUC), "CellType"], )
+rssPlot <- plotRSS(rss)
+plotly::ggplotly(rssPlot$plot)
+```
+
